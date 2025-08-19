@@ -12,7 +12,6 @@
   <!-- Babel so we can write JSX in one file -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
-    /* optional clamp helper */
     .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
   </style>
 </head>
@@ -22,13 +21,18 @@
   <script type="text/babel">
     const { useState, useEffect, useCallback } = React;
 
-    // ---------- utils ----------
+    // ---------- storage + utils ----------
+    const STORAGE_VERSION = "v2"; // bump if you change defaults so old localStorage keys are ignored
+    const BASE_KEY = `wd_base_${STORAGE_VERSION}`;
+    const KEY_KEY  = `wd_key_${STORAGE_VERSION}`;
+
     const ls = {
       get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
       set(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
       del(k) { localStorage.removeItem(k); }
     };
     const cx = (...xs) => xs.filter(Boolean).join(" ");
+    function confirmAsync(msg) { return Promise.resolve(window.confirm(msg)); }
 
     function useLocalState(key, init) {
       const [v, set] = useState(() => ls.get(key, init));
@@ -36,10 +40,12 @@
       return [v, set];
     }
 
+    // ---------- API hook ----------
     function useAPI() {
-      const [base, setBase] = useLocalState("wd_base", "https://backend-api-6gtf.onrender.com");
-      const [key, setKey] = useLocalState("wd_key", "");
-      const authed = Boolean(base);
+      // Put your actual backend URL here (https only if your site is https)
+      const DEFAULT_BASE = "https://YOUR-BACKEND.onrender.com";
+      const [base, setBase] = useLocalState(BASE_KEY, DEFAULT_BASE);
+      const [key,  setKey]  = useLocalState(KEY_KEY, "");
 
       async function req(path, opts = {}) {
         const url = base.replace(/\/$/, "") + path;
@@ -50,47 +56,47 @@
         }
         const res = await fetch(url, { ...opts, headers });
         if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+          const txt = await res.text().catch(()=> "");
+          throw new Error(`${res.status} ${res.statusText}${txt ? `: ${txt}` : ""}`);
         }
         const ct = res.headers.get("content-type") || "";
         return ct.includes("application/json") ? res.json() : res.text();
       }
 
       async function health() {
-        // /health requires no key; good to verify base URL
         const url = base.replace(/\/$/, "") + "/health";
         const res = await fetch(url);
         if (!res.ok) throw new Error(await res.text());
         return res.json();
       }
 
-      return { base, setBase, key, setKey, authed, req, health };
+      return { base, setBase, key, setKey, req, health };
     }
 
-    // ---------- app ----------
+    // ---------- UI ----------
     function App() {
       const api = useAPI();
       const [tab, setTab] = useState("cases");
       const [error, setError] = useState("");
 
       function logout() {
-        api.setKey("");
-        setError("");
+        ls.del(BASE_KEY);
+        ls.del(KEY_KEY);
+        window.location.reload();
       }
 
       return (
         <div className="space-y-4">
           <Header />
-          {!api.authed ? (
+          {!api.base ? (
             <Login api={api} onError={setError} onSuccess={() => setTab("cases")} />
           ) : (
             <>
               <TopBar tab={tab} setTab={setTab} base={api.base} logout={logout} />
               {error && <Alert kind="error" text={error} onClose={() => setError("")} />}
-              {tab === "cases" && <CasesView api={api} onError={setError} />}
-              {tab === "reports" && <ReportsView api={api} onError={setError} />}
-              {tab === "scan" && <ScanView api={api} onError={setError} />}
+              {tab === "cases"    && <CasesView api={api} onError={setError} />}
+              {tab === "reports"  && <ReportsView api={api} onError={setError} />}
+              {tab === "scan"     && <ScanView api={api} onError={setError} />}
               {tab === "settings" && <SettingsView api={api} onError={setError} />}
             </>
           )}
@@ -105,6 +111,8 @@
             <h1 className="text-2xl font-bold">STOP-PREDS Watchdog</h1>
             <p className="text-sm text-gray-500">Protecting kids where platforms fall short.</p>
           </div>
+          <a className="text-xs text-gray-500 hover:underline" target="_blank" rel="noreferrer"
+             href="https://github.com/STOP-PREDS">GitHub</a>
         </div>
       );
     }
@@ -139,13 +147,13 @@
         : "bg-blue-50 text-blue-800 border-blue-200";
       return (
         <div className={cx("border rounded-lg p-3 text-sm flex items-start justify-between", colors)}>
-          <div>{text}</div>
+          <div className="whitespace-pre-wrap">{text}</div>
           <button className="opacity-60 hover:opacity-100" onClick={onClose}>✕</button>
         </div>
       );
     }
 
-    // ---------- login/settings ----------
+    // ---------- auth/settings ----------
     function Login({ api, onError, onSuccess }) {
       const [base, setBase] = useState(api.base);
       const [key, setKey] = useState(api.key);
@@ -160,7 +168,6 @@
           await api.health();
           onSuccess();
         } catch (err) {
-          api.setKey("");
           onError(String(err.message || err));
         } finally { setBusy(false); }
       }
@@ -196,6 +203,9 @@
         catch (e) { setErr(String(e.message || e)); }
       }
 
+      const exportCSV = api.base.replace(/\/$/,'') + '/export/reports.csv?flagged_only=true';
+      const exportJSON = api.base.replace(/\/$/,'') + '/export/reports.json';
+
       return (
         <div className="bg-white rounded-xl shadow p-4 max-w-2xl">
           <h3 className="font-semibold mb-2">Settings</h3>
@@ -209,8 +219,8 @@
               <input className="w-full border rounded-lg p-2" type="password" value={key} onChange={e=>setKey(e.target.value)} />
             </div>
             <div className="flex gap-2">
-              <a href={api.base.replace(/\/$/,'') + '/export/reports.csv?flagged_only=true'} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export Flagged CSV</a>
-              <a href={api.base.replace(/\/$/,'') + '/export/reports.json'} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export JSON</a>
+              <a href={exportCSV} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export Flagged CSV</a>
+              <a href={exportJSON} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export JSON</a>
             </div>
             <button className="px-3 py-2 bg-indigo-600 text-white rounded-lg">Save</button>
           </form>
@@ -378,6 +388,17 @@
         } catch (e) { onError(String(e.message || e)); }
       }
 
+      async function onDelete() {
+        try {
+          const ok = await confirmAsync(`Delete case ${caseObj.case_number}? This will also delete its linked reports.`);
+          if (!ok) return;
+          await api.req(`/cases/${caseObj.id}`, { method: "DELETE" });
+          onChanged(); // refresh list
+        } catch (e) {
+          onError(String(e.message || e));
+        }
+      }
+
       return (
         <div className="bg-white rounded-xl shadow p-4">
           <div className="flex items-center justify-between">
@@ -409,6 +430,7 @@
             <div className="flex gap-2">
               <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOpen(v=>!v)}>{open? "Hide":"Open"}</button>
               <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setEdit(v=>!v)}>{edit? "Cancel":"Edit"}</button>
+              <button className="px-3 py-2 bg-red-600 text-white rounded-lg" onClick={onDelete}>Delete</button>
             </div>
           </div>
 
