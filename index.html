@@ -4,16 +4,14 @@
   <meta charset="utf-8" />
   <title>STOP-PREDS Watchdog</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Tailwind (CDN) -->
+  <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React + ReactDOM (UMD) -->
+  <!-- React UMD -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel so we can write JSX in one file -->
+  <!-- Babel (JSX inline) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <style>
-    .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
-  </style>
+  <style>.line-clamp-4{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}</style>
 </head>
 <body class="bg-gray-50 text-gray-900">
   <div id="root" class="container mx-auto p-4"></div>
@@ -22,7 +20,7 @@
     const { useState, useEffect, useCallback } = React;
 
     // ---------- storage + utils ----------
-    const STORAGE_VERSION = "v2"; // bump if you change defaults so old localStorage keys are ignored
+    const STORAGE_VERSION = "v2";
     const BASE_KEY = `wd_base_${STORAGE_VERSION}`;
     const KEY_KEY  = `wd_key_${STORAGE_VERSION}`;
 
@@ -32,7 +30,7 @@
       del(k) { localStorage.removeItem(k); }
     };
     const cx = (...xs) => xs.filter(Boolean).join(" ");
-    function confirmAsync(msg) { return Promise.resolve(window.confirm(msg)); }
+    const confirmAsync = (msg) => Promise.resolve(window.confirm(msg));
 
     function useLocalState(key, init) {
       const [v, set] = useState(() => ls.get(key, init));
@@ -42,8 +40,7 @@
 
     // ---------- API hook ----------
     function useAPI() {
-      // Put your actual backend URL here (https only if your site is https)
-      const DEFAULT_BASE = "https://YOUR-BACKEND.onrender.com";
+      const DEFAULT_BASE = window.location.origin + "/api"; // <- set yours
       const [base, setBase] = useLocalState(BASE_KEY, DEFAULT_BASE);
       const [key,  setKey]  = useLocalState(KEY_KEY, "");
 
@@ -76,7 +73,7 @@
     // ---------- UI ----------
     function App() {
       const api = useAPI();
-      const [tab, setTab] = useState("cases");
+      const [tab, setTab] = useState("submit"); // default to public submit page
       const [error, setError] = useState("");
 
       function logout() {
@@ -88,18 +85,14 @@
       return (
         <div className="space-y-4">
           <Header />
-          {!api.base ? (
-            <Login api={api} onError={setError} onSuccess={() => setTab("cases")} />
-          ) : (
-            <>
-              <TopBar tab={tab} setTab={setTab} base={api.base} logout={logout} />
-              {error && <Alert kind="error" text={error} onClose={() => setError("")} />}
-              {tab === "cases"    && <CasesView api={api} onError={setError} />}
-              {tab === "reports"  && <ReportsView api={api} onError={setError} />}
-              {tab === "scan"     && <ScanView api={api} onError={setError} />}
-              {tab === "settings" && <SettingsView api={api} onError={setError} />}
-            </>
-          )}
+          <TopBar tab={tab} setTab={setTab} base={api.base} logout={logout} hasKey={!!api.key} />
+          {error && <Alert kind="error" text={error} onClose={() => setError("")} />}
+
+          {tab === "submit"   && <SubmitView api={api} onError={setError} />}
+          {tab === "cases"    && <CasesView api={api} onError={setError} />}
+          {tab === "reports"  && <ReportsView api={api} onError={setError} />}
+          {tab === "scan"     && <ScanView api={api} onError={setError} />}
+          {tab === "settings" && <SettingsView api={api} onError={setError} />}
         </div>
       );
     }
@@ -117,16 +110,20 @@
       );
     }
 
-    function TopBar({ tab, setTab, base, logout }) {
+    function TopBar({ tab, setTab, base, logout, hasKey }) {
+      // "Cases", "Reports", "Scan" require API key; "Submit" and "Settings" are public
       const tabs = [
-        { id: "cases", label: "Cases" },
-        { id: "reports", label: "Reports" },
-        { id: "scan", label: "Scan Text" },
+        { id: "submit",   label: "Submit" },
+        ...(hasKey ? [
+          { id: "cases",    label: "Cases" },
+          { id: "reports",  label: "Reports" },
+          { id: "scan",     label: "Scan Text" },
+        ] : []),
         { id: "settings", label: "Settings" },
       ];
       return (
         <div className="bg-white rounded-xl shadow p-3 flex items-center justify-between">
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             {tabs.map(t => (
               <button key={t.id}
                 className={cx("px-3 py-2 rounded-lg text-sm", tab === t.id ? "bg-indigo-600 text-white" : "bg-gray-100 hover:bg-gray-200")}
@@ -135,7 +132,7 @@
           </div>
           <div className="text-xs text-gray-500 flex items-center gap-3">
             <span>API: <span className="font-mono">{base}</span></span>
-            <button className="text-red-600 hover:underline" onClick={logout}>Log out</button>
+            {hasKey && <button className="text-red-600 hover:underline" onClick={logout}>Log out</button>}
           </div>
         </div>
       );
@@ -153,45 +150,84 @@
       );
     }
 
-    // ---------- auth/settings ----------
-    function Login({ api, onError, onSuccess }) {
-      const [base, setBase] = useState(api.base);
-      const [key, setKey] = useState(api.key);
+    // ---------- Public Submit ----------
+    function SubmitView({ api, onError }) {
+      const [name, setName] = useState("");
+      const [email, setEmail] = useState("");
+      const [subjectUser, setSubjectUser] = useState("");
+      const [title, setTitle] = useState("");
+      const [description, setDescription] = useState("");
+      const [evidence, setEvidence] = useState("");
       const [busy, setBusy] = useState(false);
+      const [result, setResult] = useState(null);
 
       async function submit(e) {
-        e.preventDefault();
-        onError(""); setBusy(true);
+        e.preventDefault(); setBusy(true); onError(""); setResult(null);
         try {
-          api.setBase(base);
-          api.setKey(key);
-          await api.health();
-          onSuccess();
+          const payload = {
+            name, email: email || null,
+            subject_user: subjectUser,
+            title: title || "Public Report",
+            description,
+            evidence_links: evidence.split(",").map(s=>s.trim()).filter(Boolean),
+          };
+          const res = await fetch(api.base.replace(/\/$/,'') + "/public/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          setResult(data);
+          // clear the form
+          setName(""); setEmail(""); setSubjectUser(""); setTitle(""); setDescription(""); setEvidence("");
         } catch (err) {
           onError(String(err.message || err));
-        } finally { setBusy(false); }
+        } finally {
+          setBusy(false);
+        }
       }
 
       return (
-        <div className="max-w-xl mx-auto bg-white rounded-xl shadow p-6">
-          <h2 className="text-lg font-semibold mb-4">Sign in</h2>
-          <form onSubmit={submit} className="space-y-4">
-            <div>
-              <label className="block text-sm mb-1">API Base URL</label>
-              <input className="w-full border rounded-lg p-2" value={base} onChange={e=>setBase(e.target.value)} placeholder="https://api.onrender.com" />
-            </div>
-            <div>
-              <label className="block text-sm mb-1">API Key (X-API-Key)</label>
-              <input className="w-full border rounded-lg p-2" type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="your key" />
-            </div>
-            <button disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50">
-              {busy ? "Checking…" : "Sign in"}
-            </button>
-          </form>
+        <div className="grid md:grid-cols-2 gap-4">
+          <div className="bg-white rounded-xl shadow p-4">
+            <h3 className="font-semibold mb-2">Submit a Report</h3>
+            <p className="text-sm text-gray-600 mb-3">
+              Share details about grooming, scams, or other harmful behavior. Never upload illegal content; use links or descriptions only.
+            </p>
+            <form onSubmit={submit} className="space-y-2">
+              <div className="grid md:grid-cols-2 gap-2">
+                <input className="border rounded-lg p-2" placeholder="Your name (optional)" value={name} onChange={e=>setName(e.target.value)} />
+                <input className="border rounded-lg p-2" placeholder="Contact email (optional)" value={email} onChange={e=>setEmail(e.target.value)} />
+              </div>
+              <input className="border rounded-lg p-2" placeholder="Offender handle / user ID (optional)" value={subjectUser} onChange={e=>setSubjectUser(e.target.value)} />
+              <input className="border rounded-lg p-2" placeholder="Short title" value={title} onChange={e=>setTitle(e.target.value)} />
+              <textarea className="border rounded-lg p-2 h-40" placeholder="Describe what happened (include dates, platform, and any context)" value={description} onChange={e=>setDescription(e.target.value)}></textarea>
+              <input className="border rounded-lg p-2" placeholder="Evidence links (comma separated URLs)" value={evidence} onChange={e=>setEvidence(e.target.value)} />
+              <button disabled={busy || !description.trim()} className="px-3 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50">
+                {busy ? "Submitting…" : "Submit Report"}
+              </button>
+            </form>
+          </div>
+          <div className="bg-white rounded-xl shadow p-4">
+            <h3 className="font-semibold mb-2">Submission Result</h3>
+            {!result ? (
+              <div className="text-sm text-gray-400">No submission yet.</div>
+            ) : (
+              <div className="space-y-2 text-sm">
+                <div><b>Report ID:</b> {result.id}</div>
+                <div><b>Score:</b> {result.score}</div>
+                <div><b>Flagged:</b> {String(result.flagged)}</div>
+                <div><b>Labels:</b> {result.labels.join(", ")}</div>
+                <div className="text-gray-500 whitespace-pre-wrap">{result.content}</div>
+              </div>
+            )}
+          </div>
         </div>
       );
     }
 
+    // ---------- Settings (API base + key) ----------
     function SettingsView({ api, onError }) {
       const [base, setBase] = useState(api.base);
       const [key, setKey] = useState(api.key);
@@ -215,7 +251,7 @@
               <input className="w-full border rounded-lg p-2" value={base} onChange={e=>setBase(e.target.value)} />
             </div>
             <div>
-              <label className="block text-xs mb-1">API Key</label>
+              <label className="block text-xs mb-1">Admin API Key (for Cases/Reports/Scan)</label>
               <input className="w-full border rounded-lg p-2" type="password" value={key} onChange={e=>setKey(e.target.value)} />
             </div>
             <div className="flex gap-2">
@@ -232,7 +268,7 @@
       );
     }
 
-    // ---------- cases ----------
+    // ---------- Cases / Reports / Scan (admin) ----------
     function CasesView({ api, onError }) {
       const [items, setItems] = useState([]);
       const [q, setQ] = useState("");
@@ -358,7 +394,6 @@
       const [open, setOpen] = useState(false);
       const [reports, setReports] = useState([]);
 
-      // edit state
       const [edit, setEdit] = useState(false);
       const [title, setTitle] = useState(caseObj.title);
       const [status, setStatus] = useState(caseObj.status);
@@ -377,11 +412,7 @@
         try {
           await api.req(`/cases/${caseObj.id}`, {
             method: "PATCH",
-            body: JSON.stringify({
-              title,
-              status,
-              tags: tags.split(",").map(s=>s.trim()).filter(Boolean)
-            })
+            body: JSON.stringify({ title, status, tags: tags.split(",").map(s=>s.trim()).filter(Boolean) })
           });
           setEdit(false);
           onChanged();
@@ -393,10 +424,8 @@
           const ok = await confirmAsync(`Delete case ${caseObj.case_number}? This will also delete its linked reports.`);
           if (!ok) return;
           await api.req(`/cases/${caseObj.id}`, { method: "DELETE" });
-          onChanged(); // refresh list
-        } catch (e) {
-          onError(String(e.message || e));
-        }
+          onChanged();
+        } catch (e) { onError(String(e.message || e)); }
       }
 
       return (
@@ -503,7 +532,6 @@
       );
     }
 
-    // ---------- reports ----------
     function ReportsView({ api, onError }) {
       const [items, setItems] = useState([]);
       const [q, setQ] = useState("");
@@ -625,7 +653,6 @@
       );
     }
 
-    // ---------- scan ----------
     function ScanView({ api, onError }) {
       const [text, setText] = useState("");
       const [title, setTitle] = useState("Scanned Text");
