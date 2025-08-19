@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>STOP-PREDS Watchdog</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React + ReactDOM (UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel so we can write JSX in one file -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* optional clamp helper */
+    .line-clamp-4 { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div id="root" class="container mx-auto p-4"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ---------- utils ----------
+    const ls = {
+      get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+      set(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
+      del(k) { localStorage.removeItem(k); }
+    };
+    const cx = (...xs) => xs.filter(Boolean).join(" ");
+
+    function useLocalState(key, init) {
+      const [v, set] = useState(() => ls.get(key, init));
+      useEffect(() => { ls.set(key, v); }, [key, v]);
+      return [v, set];
+    }
+
+    function useAPI() {
+      const [base, setBase] = useLocalState("wd_base", "https://YOUR-API.onrender.com");
+      const [key, setKey] = useLocalState("wd_key", "");
+      const authed = Boolean(base);
+
+      async function req(path, opts = {}) {
+        const url = base.replace(/\/$/, "") + path;
+        const headers = { ...(opts.headers || {}) };
+        if (key) headers["X-API-Key"] = key;
+        if (!headers["Content-Type"] && !(opts.body instanceof FormData)) {
+          headers["Content-Type"] = "application/json";
+        }
+        const res = await fetch(url, { ...opts, headers });
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+        }
+        const ct = res.headers.get("content-type") || "";
+        return ct.includes("application/json") ? res.json() : res.text();
+      }
+
+      async function health() {
+        // /health requires no key; good to verify base URL
+        const url = base.replace(/\/$/, "") + "/health";
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      }
+
+      return { base, setBase, key, setKey, authed, req, health };
+    }
+
+    // ---------- app ----------
+    function App() {
+      const api = useAPI();
+      const [tab, setTab] = useState("cases");
+      const [error, setError] = useState("");
+
+      function logout() {
+        api.setKey("");
+        setError("");
+      }
+
+      return (
+        <div className="space-y-4">
+          <Header />
+          {!api.authed ? (
+            <Login api={api} onError={setError} onSuccess={() => setTab("cases")} />
+          ) : (
+            <>
+              <TopBar tab={tab} setTab={setTab} base={api.base} logout={logout} />
+              {error && <Alert kind="error" text={error} onClose={() => setError("")} />}
+              {tab === "cases" && <CasesView api={api} onError={setError} />}
+              {tab === "reports" && <ReportsView api={api} onError={setError} />}
+              {tab === "scan" && <ScanView api={api} onError={setError} />}
+              {tab === "settings" && <SettingsView api={api} onError={setError} />}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function Header() {
+      return (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">STOP-PREDS Watchdog</h1>
+            <p className="text-sm text-gray-500">Protecting kids where platforms fall short.</p>
+          </div>
+        </div>
+      );
+    }
+
+    function TopBar({ tab, setTab, base, logout }) {
+      const tabs = [
+        { id: "cases", label: "Cases" },
+        { id: "reports", label: "Reports" },
+        { id: "scan", label: "Scan Text" },
+        { id: "settings", label: "Settings" },
+      ];
+      return (
+        <div className="bg-white rounded-xl shadow p-3 flex items-center justify-between">
+          <div className="flex gap-2">
+            {tabs.map(t => (
+              <button key={t.id}
+                className={cx("px-3 py-2 rounded-lg text-sm", tab === t.id ? "bg-indigo-600 text-white" : "bg-gray-100 hover:bg-gray-200")}
+                onClick={() => setTab(t.id)}>{t.label}</button>
+            ))}
+          </div>
+          <div className="text-xs text-gray-500 flex items-center gap-3">
+            <span>API: <span className="font-mono">{base}</span></span>
+            <button className="text-red-600 hover:underline" onClick={logout}>Log out</button>
+          </div>
+        </div>
+      );
+    }
+
+    function Alert({ kind="info", text, onClose }) {
+      const colors = kind === "error"
+        ? "bg-red-50 text-red-800 border-red-200"
+        : "bg-blue-50 text-blue-800 border-blue-200";
+      return (
+        <div className={cx("border rounded-lg p-3 text-sm flex items-start justify-between", colors)}>
+          <div>{text}</div>
+          <button className="opacity-60 hover:opacity-100" onClick={onClose}>✕</button>
+        </div>
+      );
+    }
+
+    // ---------- login/settings ----------
+    function Login({ api, onError, onSuccess }) {
+      const [base, setBase] = useState(api.base);
+      const [key, setKey] = useState(api.key);
+      const [busy, setBusy] = useState(false);
+
+      async function submit(e) {
+        e.preventDefault();
+        onError(""); setBusy(true);
+        try {
+          api.setBase(base);
+          api.setKey(key);
+          await api.health();
+          onSuccess();
+        } catch (err) {
+          api.setKey("");
+          onError(String(err.message || err));
+        } finally { setBusy(false); }
+      }
+
+      return (
+        <div className="max-w-xl mx-auto bg-white rounded-xl shadow p-6">
+          <h2 className="text-lg font-semibold mb-4">Sign in</h2>
+          <form onSubmit={submit} className="space-y-4">
+            <div>
+              <label className="block text-sm mb-1">API Base URL</label>
+              <input className="w-full border rounded-lg p-2" value={base} onChange={e=>setBase(e.target.value)} placeholder="https://api.onrender.com" />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">API Key (X-API-Key)</label>
+              <input className="w-full border rounded-lg p-2" type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="your key" />
+            </div>
+            <button disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50">
+              {busy ? "Checking…" : "Sign in"}
+            </button>
+          </form>
+        </div>
+      );
+    }
+
+    function SettingsView({ api, onError }) {
+      const [base, setBase] = useState(api.base);
+      const [key, setKey] = useState(api.key);
+      const [ok, setOk] = useState(""); const [err, setErr] = useState("");
+
+      async function save(e) {
+        e.preventDefault(); setOk(""); setErr("");
+        try { api.setBase(base); api.setKey(key); await api.health(); setOk("Saved and verified."); }
+        catch (e) { setErr(String(e.message || e)); }
+      }
+
+      return (
+        <div className="bg-white rounded-xl shadow p-4 max-w-2xl">
+          <h3 className="font-semibold mb-2">Settings</h3>
+          <form onSubmit={save} className="space-y-3">
+            <div>
+              <label className="block text-xs mb-1">API Base URL</label>
+              <input className="w-full border rounded-lg p-2" value={base} onChange={e=>setBase(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs mb-1">API Key</label>
+              <input className="w-full border rounded-lg p-2" type="password" value={key} onChange={e=>setKey(e.target.value)} />
+            </div>
+            <div className="flex gap-2">
+              <a href={api.base.replace(/\/$/,'') + '/export/reports.csv?flagged_only=true'} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export Flagged CSV</a>
+              <a href={api.base.replace(/\/$/,'') + '/export/reports.json'} target="_blank" rel="noreferrer" className="px-3 py-2 bg-gray-100 rounded-lg border">Export JSON</a>
+            </div>
+            <button className="px-3 py-2 bg-indigo-600 text-white rounded-lg">Save</button>
+          </form>
+          <div className="mt-2 text-sm">
+            {ok && <div className="text-green-700">{ok}</div>}
+            {err && <div className="text-red-700">{err}</div>}
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- cases ----------
+    function CasesView({ api, onError }) {
+      const [items, setItems] = useState([]);
+      const [q, setQ] = useState("");
+      const [status, setStatus] = useState("");
+      const [limit, setLimit] = useState(25);
+      const [offset, setOffset] = useState(0);
+      const [busy, setBusy] = useState(false);
+
+      const reload = useCallback(async () => {
+        setBusy(true); onError("");
+        try {
+          const params = new URLSearchParams();
+          if (q) params.set("q", q);
+          if (status) params.set("status", status);
+          params.set("limit", String(limit));
+          params.set("offset", String(offset));
+          const rows = await api.req(`/cases?${params.toString()}`);
+          setItems(rows);
+        } catch (e) { onError(String(e.message || e)); }
+        finally { setBusy(false); }
+      }, [api, q, status, limit, offset, onError]);
+
+      useEffect(() => { reload(); }, [reload]);
+
+      return (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl shadow p-4">
+            <div className="flex flex-wrap gap-2 items-end">
+              <div>
+                <label className="block text-xs mb-1">Search</label>
+                <input className="border rounded-lg p-2" value={q} onChange={e=>setQ(e.target.value)} placeholder="title/tags/case#" />
+              </div>
+              <div>
+                <label className="block text-xs mb-1">Status</label>
+                <select className="border rounded-lg p-2" value={status} onChange={e=>setStatus(e.target.value)}>
+                  <option value="">Any</option>
+                  <option value="open">open</option>
+                  <option value="investigating">investigating</option>
+                  <option value="closed">closed</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs mb-1">Limit</label>
+                <input className="border rounded-lg p-2 w-24" type="number" value={limit} onChange={e=>setLimit(Number(e.target.value))} />
+              </div>
+              <div className="ml-auto flex gap-2">
+                <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOffset(Math.max(0, offset - limit))}>Prev</button>
+                <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOffset(offset + limit)}>Next</button>
+                <button className="px-3 py-2 bg-indigo-600 text-white rounded-lg" onClick={reload}>{busy ? "Loading…" : "Refresh"}</button>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <NewCaseCard api={api} onCreate={reload} onError={onError} />
+            <LinkReportCard api={api} onLinked={reload} onError={onError} />
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {items.map(c => (
+              <CaseCard key={c.id} api={api} caseObj={c} onChanged={reload} onError={onError} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function NewCaseCard({ api, onCreate, onError }) {
+      const [title, setTitle] = useState("");
+      const [tags, setTags] = useState("");
+      const [busy, setBusy] = useState(false);
+
+      async function submit(e) {
+        e.preventDefault(); setBusy(true);
+        try {
+          await api.req("/cases", { method: "POST", body: JSON.stringify({
+            title, tags: tags.split(",").map(s=>s.trim()).filter(Boolean)
+          })});
+          setTitle(""); setTags(""); onCreate();
+        } catch(e) { onError(String(e.message || e)); }
+        finally { setBusy(false); }
+      }
+
+      return (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="font-semibold mb-2">Open Case</h3>
+          <form onSubmit={submit} className="space-y-2">
+            <input className="w-full border rounded-lg p-2" placeholder="Case title" value={title} onChange={e=>setTitle(e.target.value)} />
+            <input className="w-full border rounded-lg p-2" placeholder="tags (comma separated)" value={tags} onChange={e=>setTags(e.target.value)} />
+            <button disabled={busy || !title.trim()} className="px-3 py-2 bg-indigo-600 text-white rounded-lg">{busy? "Creating…":"Create"}</button>
+          </form>
+        </div>
+      );
+    }
+
+    function LinkReportCard({ api, onLinked, onError }) {
+      const [reportId, setReportId] = useState("");
+      const [caseId, setCaseId] = useState("");
+      const [busy, setBusy] = useState(false);
+
+      async function submit(e) {
+        e.preventDefault(); setBusy(true);
+        try {
+          await api.req(`/reports/${reportId}`, { method: "PATCH", body: JSON.stringify({ case_id: Number(caseId) }) });
+          setReportId(""); setCaseId(""); onLinked();
+        } catch (e) { onError(String(e.message || e)); }
+        finally { setBusy(false); }
+      }
+
+      return (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="font-semibold mb-2">Link Report → Case</h3>
+          <form onSubmit={submit} className="space-y-2">
+            <input className="w-full border rounded-lg p-2" placeholder="Report ID" value={reportId} onChange={e=>setReportId(e.target.value)} />
+            <input className="w-full border rounded-lg p-2" placeholder="Case ID" value={caseId} onChange={e=>setCaseId(e.target.value)} />
+            <button disabled={busy || !reportId || !caseId} className="px-3 py-2 bg-green-600 text-white rounded-lg">{busy? "Linking…":"Link"}</button>
+          </form>
+        </div>
+      );
+    }
+
+    function CaseCard({ api, caseObj, onChanged, onError }) {
+      const [open, setOpen] = useState(false);
+      const [reports, setReports] = useState([]);
+
+      // edit state
+      const [edit, setEdit] = useState(false);
+      const [title, setTitle] = useState(caseObj.title);
+      const [status, setStatus] = useState(caseObj.status);
+      const [tags, setTags] = useState((caseObj.tags||[]).join(", "));
+
+      async function loadReports() {
+        try {
+          const rows = await api.req(`/reports?case_id=${caseObj.id}&limit=100`);
+          setReports(rows);
+        } catch (e) { onError(String(e.message || e)); }
+      }
+      useEffect(() => { if (open) loadReports(); }, [open]);
+
+      async function save(e) {
+        e.preventDefault();
+        try {
+          await api.req(`/cases/${caseObj.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              title,
+              status,
+              tags: tags.split(",").map(s=>s.trim()).filter(Boolean)
+            })
+          });
+          setEdit(false);
+          onChanged();
+        } catch (e) { onError(String(e.message || e)); }
+      }
+
+      return (
+        <div className="bg-white rounded-xl shadow p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm text-gray-500">{caseObj.case_number}</div>
+              {!edit ? (
+                <h3 className="text-lg font-semibold">{caseObj.title}</h3>
+              ) : (
+                <input className="border rounded-lg p-2 w-full" value={title} onChange={e=>setTitle(e.target.value)} />
+              )}
+              <div className="text-xs mt-1">
+                {!edit ? (
+                  <>
+                    <span className="px-2 py-1 rounded bg-gray-100 mr-2">{caseObj.status}</span>
+                    {(caseObj.tags||[]).map(t => <span key={t} className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 mr-2">{t}</span>)}
+                  </>
+                ) : (
+                  <div className="mt-2 grid sm:grid-cols-3 gap-2">
+                    <select className="border rounded-lg p-2" value={status} onChange={e=>setStatus(e.target.value)}>
+                      <option>open</option>
+                      <option>investigating</option>
+                      <option>closed</option>
+                    </select>
+                    <input className="border rounded-lg p-2 sm:col-span-2" value={tags} onChange={e=>setTags(e.target.value)} placeholder="tag1, tag2" />
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOpen(v=>!v)}>{open? "Hide":"Open"}</button>
+              <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setEdit(v=>!v)}>{edit? "Cancel":"Edit"}</button>
+            </div>
+          </div>
+
+          {edit && (
+            <form onSubmit={save} className="mt-3">
+              <button className="px-3 py-2 bg-indigo-600 text-white rounded-lg">Save</button>
+            </form>
+          )}
+
+          {open && (
+            <div className="mt-4 space-y-3">
+              <div className="text-sm text-gray-500">Reports in case</div>
+              <div className="space-y-2">
+                {reports.map(r => (
+                  <ReportRow key={r.id} r={r} api={api} onChanged={loadReports} onError={onError} />
+                ))}
+                {reports.length === 0 && <div className="text-sm text-gray-400">No reports linked.</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ReportRow({ r, api, onChanged, onError }) {
+      const [edit, setEdit] = useState(false);
+      const [flagged, setFlagged] = useState(r.flagged);
+      const [labels, setLabels] = useState(r.labels.join(", "));
+      const [caseId, setCaseId] = useState(r.case_id || "");
+
+      async function save(e) {
+        e.preventDefault();
+        try {
+          const payload = {
+            flagged,
+            labels: labels.split(",").map(s=>s.trim()).filter(Boolean),
+            case_id: caseId ? Number(caseId) : null
+          };
+          await api.req(`/reports/${r.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+          setEdit(false);
+          onChanged();
+        } catch (e) { onError(String(e.message || e)); }
+      }
+
+      return (
+        <div className="border rounded-lg p-3">
+          <div className="flex items-center justify-between">
+            <div className="font-mono text-sm">Report #{r.id}</div>
+            <button className="px-2 py-1 bg-gray-100 rounded" onClick={()=>setEdit(v=>!v)}>{edit? "Close":"Edit"}</button>
+          </div>
+          <div className="mt-2 text-sm text-gray-600 whitespace-pre-wrap line-clamp-4">{r.content}</div>
+          {!edit ? (
+            <div className="mt-2 text-xs text-gray-500 flex gap-2 flex-wrap">
+              <span>Score: <b>{r.score}</b></span>
+              <span>Flagged: <b>{String(r.flagged)}</b></span>
+              <span>Labels: {r.labels.map(l => <span key={l} className="px-1 bg-indigo-50 text-indigo-700 rounded mr-1">{l}</span>)}</span>
+              {r.case_id && <span>Case ID: <b>{r.case_id}</b></span>}
+            </div>
+          ) : (
+            <form onSubmit={save} className="mt-3 grid md:grid-cols-3 gap-3">
+              <label className="flex items-center gap-2"><input type="checkbox" checked={flagged} onChange={e=>setFlagged(e.target.checked)} /> Flagged</label>
+              <input className="border rounded-lg p-2" placeholder="labels, comma separated" value={labels} onChange={e=>setLabels(e.target.value)} />
+              <input className="border rounded-lg p-2" placeholder="Case ID (optional)" value={caseId} onChange={e=>setCaseId(e.target.value)} />
+              <div className="md:col-span-3">
+                <button className="px-3 py-2 bg-green-600 text-white rounded-lg">Save</button>
+              </div>
+            </form>
+          )}
+        </div>
+      );
+    }
+
+    // ---------- reports ----------
+    function ReportsView({ api, onError }) {
+      const [items, setItems] = useState([]);
+      const [q, setQ] = useState("");
+      const [label, setLabel] = useState("");
+      const [flagged, setFlagged] = useState("");
+      const [limit, setLimit] = useState(25);
+      const [offset, setOffset] = useState(0);
+      const [sort, setSort] = useState("new");
+      const [busy, setBusy] = useState(false);
+
+      const reload = useCallback(async () => {
+        setBusy(true); onError("");
+        try {
+          const params = new URLSearchParams();
+          if (q) params.set("q", q);
+          if (label) params.set("label", label);
+          if (flagged) params.set("flagged", flagged);
+          params.set("limit", String(limit));
+          params.set("offset", String(offset));
+          params.set("sort", sort);
+          const rows = await api.req(`/reports?${params.toString()}`);
+          setItems(rows);
+        } catch (e) { onError(String(e.message || e)); }
+        finally { setBusy(false); }
+      }, [api, q, label, flagged, limit, offset, sort, onError]);
+
+      useEffect(() => { reload(); }, [reload]);
+
+      return (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl shadow p-4">
+            <div className="grid md:grid-cols-6 gap-2 items-end">
+              <div className="md:col-span-2">
+                <label className="block text-xs mb-1">Search</label>
+                <input className="border rounded-lg p-2 w-full" value={q} onChange={e=>setQ(e.target.value)} placeholder="title/content/user" />
+              </div>
+              <div>
+                <label className="block text-xs mb-1">Label</label>
+                <input className="border rounded-lg p-2 w-full" value={label} onChange={e=>setLabel(e.target.value)} placeholder="e.g. grooming" />
+              </div>
+              <div>
+                <label className="block text-xs mb-1">Flagged</label>
+                <select className="border rounded-lg p-2" value={flagged} onChange={e=>setFlagged(e.target.value)}>
+                  <option value="">Any</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs mb-1">Sort</label>
+                <select className="border rounded-lg p-2" value={sort} onChange={e=>setSort(e.target.value)}>
+                  <option value="new">new</option>
+                  <option value="score_desc">score_desc</option>
+                  <option value="score_asc">score_asc</option>
+                </select>
+              </div>
+              <div className="flex gap-2 justify-end md:justify-start">
+                <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOffset(Math.max(0, offset - limit))}>Prev</button>
+                <button className="px-3 py-2 bg-gray-100 rounded-lg" onClick={() => setOffset(offset + limit)}>Next</button>
+                <button className="px-3 py-2 bg-indigo-600 text-white rounded-lg" onClick={reload}>{busy ? "Loading…" : "Refresh"}</button>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {items.map(r => (
+              <div key={r.id} className="bg-white rounded-xl shadow p-4">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold">{r.title}</div>
+                  <span className={cx("text-xs px-2 py-1 rounded", r.flagged ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
+                    {r.flagged ? "FLAGGED" : "OK"}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-500">#{r.id} • {r.source} • score {r.score}</div>
+                <div className="mt-2 text-sm text-gray-700 whitespace-pre-wrap line-clamp-4">{r.content}</div>
+                <div className="mt-2 text-xs text-gray-500 flex flex-wrap gap-1">
+                  {r.labels.map(l => <span key={l} className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">{l}</span>)}
+                </div>
+                <ReportInlineEditor r={r} api={api} onChanged={reload} onError={(e)=>console.error(e)||onError(e)} />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function ReportInlineEditor({ r, api, onChanged, onError }) {
+      const [open, setOpen] = useState(false);
+      const [flagged, setFlagged] = useState(r.flagged);
+      const [labels, setLabels] = useState(r.labels.join(", "));
+      const [caseId, setCaseId] = useState(r.case_id || "");
+
+      async function save(e) {
+        e.preventDefault();
+        try {
+          const payload = {
+            flagged,
+            labels: labels.split(",").map(s=>s.trim()).filter(Boolean),
+            case_id: caseId ? Number(caseId) : null
+          };
+          await api.req(`/reports/${r.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+          setOpen(false);
+          onChanged();
+        } catch (e) { onError(String(e.message || e)); }
+      }
+
+      return (
+        <div className="mt-3">
+          <button className="text-xs text-indigo-600 hover:underline" onClick={()=>setOpen(v=>!v)}>{open? "Close":"Edit"}</button>
+          {open && (
+            <form onSubmit={save} className="mt-2 grid gap-2">
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={flagged} onChange={e=>setFlagged(e.target.checked)} /> Flagged</label>
+              <input className="border rounded-lg p-2" placeholder="labels, comma separated" value={labels} onChange={e=>setLabels(e.target.value)} />
+              <input className="border rounded-lg p-2" placeholder="Case ID (optional)" value={caseId} onChange={e=>setCaseId(e.target.value)} />
+              <div><button className="px-3 py-2 bg-green-600 text-white rounded-lg">Save</button></div>
+            </form>
+          )}
+        </div>
+      );
+    }
+
+    // ---------- scan ----------
+    function ScanView({ api, onError }) {
+      const [text, setText] = useState("");
+      const [title, setTitle] = useState("Scanned Text");
+      const [source, setSource] = useState("unknown");
+      const [result, setResult] = useState(null);
+      const [busy, setBusy] = useState(false);
+
+      async function submit(e) {
+        e.preventDefault();
+        setBusy(true); onError("");
+        try {
+          const fd = new FormData();
+          fd.set("text", text);
+          fd.set("title", title);
+          fd.set("source", source);
+          const r = await fetch(api.base.replace(/\/$/,'') + "/ingest/scan_text", {
+            method: "POST", headers: { "X-API-Key": api.key }, body: fd
+          });
+          if (!r.ok) throw new Error(await r.text());
+          const data = await r.json();
+          setResult(data);
+        } catch (e) { onError(String(e.message || e)); }
+        finally { setBusy(false); }
+      }
+
+      return (
+        <div className="grid md:grid-cols-2 gap-4">
+          <div className="bg-white rounded-xl shadow p-4">
+            <h3 className="font-semibold mb-2">Scan Text</h3>
+            <form onSubmit={submit} className="space-y-2">
+              <input className="w-full border rounded-lg p-2" value={title} onChange={e=>setTitle(e.target.value)} />
+              <input className="w-full border rounded-lg p-2" value={source} onChange={e=>setSource(e.target.value)} placeholder="source (discord/roblox/etc)" />
+              <textarea className="w-full border rounded-lg p-2 h-40" value={text} onChange={e=>setText(e.target.value)} placeholder="paste content here"></textarea>
+              <button disabled={busy || !text.trim()} className="px-3 py-2 bg-indigo-600 text-white rounded-lg">{busy? "Scanning…":"Scan"}</button>
+            </form>
+          </div>
+          <div className="bg-white rounded-xl shadow p-4">
+            <h3 className="font-semibold mb-2">Result</h3>
+            {!result ? (
+              <div className="text-sm text-gray-400">No scan yet.</div>
+            ) : (
+              <div className="space-y-2 text-sm">
+                <div><b>ID:</b> {result.id}</div>
+                <div><b>Score:</b> {result.score}</div>
+                <div><b>Flagged:</b> {String(result.flagged)}</div>
+                <div><b>Labels:</b> {result.labels.join(", ")}</div>
+                <div className="text-gray-500 whitespace-pre-wrap">{result.content}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ---------- mount ----------
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
