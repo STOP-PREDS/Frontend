@@ -70,7 +70,7 @@
       async function linkReport(reportId, caseId) {
         const fd = new FormData();
         fd.set("case_id", String(caseId));
-        const url = base.replace(/\/$/, "") + `/reports/${reportId}/link_case?k=20051214`;
+        const url = base.replace(/\/$/, "") + `/reports/${reportId}/link_case?k=20251214`;
         const r = await fetch(url, { method: "POST", body: fd }); // no custom headers -> no preflight
         if (!r.ok) throw new Error(await r.text());
         return r.json();
